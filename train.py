@@ -10,7 +10,7 @@ if __name__=="__main__":
     parser.add_argument("--saveFolder","-s",dest="saveFolder",type=str,default="models")
     parser.add_argument("--reload","-l",dest="reload",type=str,default=None)
     args = parser.parse_args()
-    args.zdim = 20
+    args.zdim = 100
 
     batch = BatchGenerator()
     vae = VAE(isTraining=True,imageSize=[64,64],labelSize=0,args=args)
