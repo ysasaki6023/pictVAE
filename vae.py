@@ -12,6 +12,19 @@ class BatchGenerator:
         self.imgSize = (64,64)
         assert self.imgSize[0]==self.imgSize[1]
 
+    def getOne(self,idx):
+        x   = np.zeros( (1,self.imgSize[0],self.imgSize[1],1), dtype=np.float32)
+
+        img = cv2.imread(self.imagePath[idx],cv2.IMREAD_GRAYSCALE)
+        img = np.expand_dims(img,axis=2)
+        dmin = min(img.shape[0],img.shape[1])
+        img = img[int(0.5*(img.shape[0]-dmin)):int(0.5*(img.shape[0]+dmin)),int(0.5*(img.shape[1]-dmin)):int(0.5*(img.shape[1]+dmin)),:]
+        img = cv2.resize(img,self.imgSize)
+        img = np.expand_dims(img,axis=2)
+        x[0,:,:,:] = img / 255.
+
+        return x,None
+
     def getBatch(self,nBatch):
         x   = np.zeros( (nBatch,self.imgSize[0],self.imgSize[1],1), dtype=np.float32)
         for i in range(nBatch):
@@ -35,6 +48,7 @@ class VAE:
         self.saveFolder = args.saveFolder
         self.reload = args.reload
         self.labelSize = labelSize
+        self.initOP = None
         self.buildModel()
 
         return
@@ -159,7 +173,7 @@ class VAE:
 
         return y
 
-    def buildEncoder(self,y,label=None,reuse=False):
+    def buildEncoder(self,y,isTraining=True,label=None,reuse=False):
         with tf.variable_scope("Encoder") as scope:
             if reuse: scope.reuse_variables()
 
@@ -178,25 +192,25 @@ class VAE:
             # conv1
             self.e_conv1_w, self.e_conv1_b = self._conv_variable([5,5,dim_next,8],name="econv1")
             h = self._conv2d(h,self.e_conv1_w, stride=2) + self.e_conv1_b
-            #h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=self.isTraining, scope="dNorm1")
+            #h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=isTraining, scope="dNorm1")
             h = self.leakyReLU(h)
 
             # conv2
             self.e_conv2_w, self.e_conv2_b = self._conv_variable([5,5,8,32],name="econv2")
             h = self._conv2d(h,self.e_conv2_w, stride=2) + self.e_conv2_b
-            #h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=self.isTraining, scope="dNorm2")
+            #h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=isTraining, scope="dNorm2")
             h = self.leakyReLU(h)
 
             # conv3
             self.e_conv3_w, self.e_conv3_b = self._conv_variable([5,5,32,64],name="econv3")
             h = self._conv2d(h,self.e_conv3_w, stride=2) + self.e_conv3_b
-            h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=self.isTraining, scope="eNorm1")
+            h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=isTraining, scope="eNorm1")
             h = self.leakyReLU(h)
 
             # conv4
             self.e_conv4_w, self.e_conv4_b = self._conv_variable([5,5,64,128],name="econv4")
             h = self._conv2d(h,self.e_conv4_w, stride=2) + self.e_conv4_b
-            #h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=self.isTraining, scope="dNorm2")
+            #h = tf.contrib.layers.batch_norm(h, decay=0.9, updates_collections=None, epsilon=1e-5, scale=True, is_training=isTraining, scope="dNorm2")
             h = self.leakyReLU(h)
 
             h_mu = h_sigma = h
@@ -215,10 +229,6 @@ class VAE:
 
             ### summary
             if not reuse:
-                tf.summary.histogram("e_fc_mu_w"   ,self.e_fc_mu_w)
-                tf.summary.histogram("e_fc_mu_b"   ,self.e_fc_mu_b)
-                tf.summary.histogram("e_fc_sigma_w"   ,self.e_fc_sigma_w)
-                tf.summary.histogram("e_fc_sigma_b"   ,self.e_fc_sigma_b)
                 tf.summary.histogram("e_conv1_w"   ,self.e_conv1_w)
                 tf.summary.histogram("e_conv1_b"   ,self.e_conv1_b)
                 tf.summary.histogram("e_conv2_w"   ,self.e_conv2_w)
@@ -227,6 +237,10 @@ class VAE:
                 tf.summary.histogram("e_conv3_b"   ,self.e_conv3_b)
                 tf.summary.histogram("e_conv4_w"   ,self.e_conv4_w)
                 tf.summary.histogram("e_conv4_b"   ,self.e_conv4_b)
+                tf.summary.histogram("e_fc_mu_w"   ,self.e_fc_mu_w)
+                tf.summary.histogram("e_fc_mu_b"   ,self.e_fc_mu_b)
+                tf.summary.histogram("e_fc_sigma_w"   ,self.e_fc_sigma_w)
+                tf.summary.histogram("e_fc_sigma_b"   ,self.e_fc_sigma_b)
 
         return h_mu,h_lnsigma
 
@@ -235,12 +249,14 @@ class VAE:
         self.x      = tf.placeholder(tf.float32, [self.nBatch, self.imageSize[0], self.imageSize[1], 1],name="image")
         #self.l      = tf.placeholder(tf.int32  , [self.nBatch],name="label")
 
-        self.z_mu, self.z_lnsigma = self.buildEncoder(self.x) # lnsigma = ln(sigma)... This admits to take -inf,+inf and make the calculation easier
+        self.z_mu, self.z_lnsigma = self.buildEncoder(self.x,isTraining=self.isTraining) # lnsigma = ln(sigma)... This admits to take -inf,+inf and make the calculation easier
+        #self.z_mu      = tf.clip_by_value(self.z_mu,0.,1e+2)
+        #self.z_lnsigma = tf.clip_by_value(self.z_lnsigma,0.,1e+2)
         # z -> [u_1,u_2,...],[s_1,s_2,...]
         rand        = tf.random_normal([self.nBatch,self.zdim]) # normal distribution
         self.z      = rand * tf.exp(self.z_lnsigma) + self.z_mu
 
-        self.y      = self.buildDecoder(self.z)
+        self.y      = self.buildDecoder(self.z,isTraining=self.isTraining)
         self.y_sample = self.buildDecoder(self.z,reuse=True,isTraining=False)
 
         self.gen_loss = - tf.reduce_sum( self.x * tf.log( tf.clip_by_value(self.y,1e-20,1e+20)) + (1.-self.x) * tf.log( tf.clip_by_value(1.-self.y,1e-20,1e+20))) # bbernoulli negative log likelihood. May be replaced by RMS?
@@ -259,7 +275,7 @@ class VAE:
 
         #############################
         # define session
-        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.15))
+        config = tf.ConfigProto(gpu_options=tf.GPUOptions(per_process_gpu_memory_fraction=0.25))
         self.sess = tf.Session(config=config)
 
         #############################
@@ -267,6 +283,12 @@ class VAE:
         self.saver = tf.train.Saver(max_to_keep=0)
         self.summary = tf.summary.merge_all()
         if self.saveFolder: self.writer = tf.summary.FileWriter(self.saveFolder, self.sess.graph)
+
+        #############################
+        ### initializer
+        self.initOP = tf.global_variables_initializer()
+        self.sess.run(self.initOP)
+
 
         return
 
@@ -285,9 +307,6 @@ class VAE:
         
         if self.saveFolder and not os.path.exists(os.path.join(self.saveFolder,"images")):
             os.makedirs(os.path.join(self.saveFolder,"images"))
-
-        initOP = tf.global_variables_initializer()
-        self.sess.run(initOP)
 
         self.loadModel(self.reload)
 
@@ -316,3 +335,10 @@ class VAE:
                 cv2.imwrite(os.path.join(self.saveFolder,"images","img_%d_fake.png"%step),tileImage(g_image1)*255.)
                 #cv2.imwrite(os.path.join(self.saveFolder,"images","img_%d_fake2.png"%step),tileImage(g_image2)*255.)
                 self.saver.save(self.sess,os.path.join(self.saveFolder,"model.ckpt"),step)
+
+    def test(self,z,loadModel=True):
+        if self.saveFolder and not os.path.exists(os.path.join(self.saveFolder,"timages")):
+            os.makedirs(os.path.join(self.saveFolder,"timages"))
+
+        y = self.sess.run(self.y,feed_dict={self.z:z})
+        return y[0]*255.
